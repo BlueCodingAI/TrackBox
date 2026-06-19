@@ -10,9 +10,12 @@ WorkingDirectory=/opt/trackbox
 # HOME must be set so Playwright can find the browser it downloaded to
 # ~/.cache/ms-playwright (installed as the same user).
 Environment=HOME=/opt/trackbox
-# The app reads /opt/trackbox/.env via pydantic-settings (WorkingDirectory).
+# Internal port the app listens on (Nginx proxies to it). Override by setting
+# APP_PORT in /opt/trackbox/.env. Default 8080 if not set.
+Environment=APP_PORT=8080
+EnvironmentFile=-/opt/trackbox/.env
 ExecStart=/opt/trackbox/.venv/bin/uvicorn app.main:app \
-    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers --forwarded-allow-ips=*
+    --host 127.0.0.1 --port ${APP_PORT} --workers 1 --proxy-headers --forwarded-allow-ips=*
 Restart=always
 RestartSec=3
 # headless Chromium can be memory hungry; give it room / restart if it leaks

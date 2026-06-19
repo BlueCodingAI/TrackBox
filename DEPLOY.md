@@ -68,18 +68,24 @@ SCRAPE_BROWSER_CHANNEL=        # empty = use the Chromium installed in step 5
 SCRAPE_HEADLESS=true
 ENABLE_DOCS=false              # keep the API docs hidden from users
 INCLUDE_RAW=false
+APP_PORT=8080                  # internal uvicorn port — change if 8080 is taken
 # For reliable data (recommended for production), instead use:
 # PROVIDER_MODE=auto
 # SEVENTEENTRACK_API_KEY=your_free_key
 ```
 
+> **Ports.** `APP_PORT` is the *internal* port the app listens on; Nginx proxies
+> to it, so end users never see it (they hit ports 80/443). If you change
+> `APP_PORT`, update `proxy_pass` in `deploy/nginx.conf` to match. To expose the
+> app on a **custom public port** instead, see "Choosing the port" at the end.
+
 ## 7. Quick smoke test
 ```bash
 cd /opt/trackbox
-sudo -u trackbox HOME=/opt/trackbox .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+sudo -u trackbox HOME=/opt/trackbox .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080 &
 sleep 3
-curl -s localhost:8000/api/health        # -> {"status":"ok"}
-curl -s "localhost:8000/api/track?number=00340434498968565356&carrier=7041" | head -c 300
+curl -s localhost:8080/api/health        # -> {"status":"ok"}
+curl -s "localhost:8080/api/track?number=00340434498968565356&carrier=7041" | head -c 300
 kill %1
 ```
 
@@ -137,3 +143,33 @@ sudo systemctl restart trackbox
 | 502 Bad Gateway | Service not running: `sudo systemctl status trackbox`, check logs. |
 | Lookups time out at proxy | Raise `proxy_read_timeout` in the Nginx config. |
 | High memory / OOM | Keep `--workers 1`; ensure ≥1 GB RAM; the unit caps at `MemoryMax=1500M`. |
+
+---
+
+## Choosing the port
+
+There are two layers. Pick the scenario that matches your constraint:
+
+### A. 8080 internal port is taken (most common) — keep Nginx on 80/443
+Just change the internal port; users still hit the normal `http(s)://your-domain`.
+1. Set `APP_PORT=9001` (or any free port) in `/opt/trackbox/.env`.
+2. Set `proxy_pass http://127.0.0.1:9001;` in `deploy/nginx.conf`.
+3. `sudo systemctl restart trackbox && sudo systemctl reload nginx`.
+
+### B. Serve on a custom **public** port via Nginx (e.g. `http://your-server:8090`)
+Keep the app internal; make Nginx listen on the public port.
+1. In the Nginx config change `listen 80;` → `listen 8090;`.
+2. Open it: `sudo ufw allow 8090/tcp`.
+3. `sudo nginx -t && sudo systemctl reload nginx`. Visit `http://SERVER_IP:8090`.
+
+### C. No Nginx — run the app directly on a public port
+Simplest, but no HTTPS unless you add it yourself.
+1. In `deploy/trackbox.service`, change the host so it's reachable:
+   `--host 0.0.0.0 --port ${APP_PORT}` and set `APP_PORT=8090` in `.env`.
+2. Open it: `sudo ufw allow 8090/tcp`.
+3. `sudo systemctl daemon-reload && sudo systemctl restart trackbox`.
+   Visit `http://SERVER_IP:8090`. (Skip the Nginx steps 9–10.)
+
+> Whichever public port you expose, open it in the firewall (`ufw allow …`) and,
+> if your VPS provider has its own network firewall/security group, allow it there
+> too.
