@@ -293,16 +293,6 @@ form.addEventListener("submit", (e) => {
   updateHash(numberInput.value, carrierCode.value);
 });
 
-document.querySelectorAll(".chip").forEach((chip) =>
-  chip.addEventListener("click", () => {
-    numberInput.value = chip.dataset.num;
-    carrierCode.value = chip.dataset.carrier || "";
-    carrierInput.value = "";
-    track(chip.dataset.num, chip.dataset.carrier);
-    updateHash(chip.dataset.num, chip.dataset.carrier);
-  })
-);
-
 /* ── carrier autocomplete ──────────────────────────────────────────────── */
 let carrierTimer = null;
 carrierInput.addEventListener("input", () => {

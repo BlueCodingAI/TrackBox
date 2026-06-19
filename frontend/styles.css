@@ -151,15 +151,6 @@ body { position: relative; overflow-x: hidden; }
 .carrier-suggest li:hover, .carrier-suggest li.active { background: var(--panel-2); }
 .carrier-suggest .c-country { color: var(--text-faint); font-size: 0.78rem; }
 
-.examples { margin-top: 18px; font-size: 0.85rem; display: flex; gap: 9px; flex-wrap: wrap; align-items: center; justify-content: center; }
-.examples-label { color: var(--text-faint); }
-.chip {
-  background: var(--panel); border: 1px solid var(--border); color: var(--text-dim); padding: 8px 15px;
-  border-radius: 999px; font-size: 0.83rem; cursor: pointer; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  transition: all 0.22s var(--ease);
-}
-.chip:hover { color: #fff; border-color: rgba(91,140,255,0.6); transform: translateY(-2px); box-shadow: 0 8px 18px -8px rgba(91,140,255,0.5); }
-
 /* ── state: loader / error ─────────────────────────────────────────────── */
 .state { text-align: center; padding: 56px 16px; color: var(--text-dim); animation: fadeUp 0.4s var(--ease); }
 .state.error { color: #ffb4b4; }
