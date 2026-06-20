@@ -61,6 +61,10 @@ async def _resolve(number: str, carrier: Optional[int]) -> TrackResponse:
             logger.exception("provider %s crashed", provider.name)
             continue
         if result is not None:
+            logger.info(
+                "resolved %r via %s (source=%s, status=%s)",
+                number, provider.name, result.source, result.status,
+            )
             return TrackResponse(ok=True, result=result)
 
     # Keep internal/provider error detail in the logs only — never leak it to

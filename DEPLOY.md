@@ -152,7 +152,8 @@ sudo systemctl restart trackbox
 |---|---|
 | `journalctl` shows *"browser launch failed"* | Re-run steps 4 & 5; confirm `SCRAPE_BROWSER_CHANNEL=` is empty. |
 | Browser deps error (`libnss3` etc.) | `sudo /opt/trackbox/.venv/bin/playwright install-deps`. |
-| Everything returns demo data | Cloudflare is blocking the VPS IP — switch to `PROVIDER_MODE=auto` + a free key. |
+| Everything returns "not found" | Cloudflare is blocking the VPS IP so the scrape never completes. Add a residential `SCRAPE_PROXY`, or use `PROVIDER_MODE=auto` + a free key. Check `journalctl -u trackbox` for "no tracking response …". |
+| Showed *wrong* parcel's data | Fixed: the scraper now verifies the captured response matches the requested number (ignores 17track's default sample / stale responses). Make sure the deployed code is up to date (`git pull` + restart). |
 | 502 Bad Gateway | Service not running: `sudo systemctl status trackbox`, check logs. |
 | Lookups time out at proxy | Raise `proxy_read_timeout` in the Nginx config. |
 | High memory / OOM | Keep `--workers 1`; ensure ≥1 GB RAM; the unit caps at `MemoryMax=1500M`. |

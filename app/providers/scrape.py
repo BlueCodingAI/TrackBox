@@ -28,6 +28,7 @@ import atexit
 import logging
 import queue
 import threading
+import time
 from concurrent.futures import Future
 from typing import Optional
 from urllib.parse import urlparse
@@ -40,6 +41,16 @@ from .solver import SolverError, get_solver
 
 logger = logging.getLogger("tracking_api.scrape")
 
+def _clean_num(s: Optional[str]) -> str:
+    return (s or "").strip().upper().replace(" ", "")
+
+
+def response_has_number(data: dict, number: str) -> bool:
+    """True if the restapi payload contains a shipment for `number`."""
+    target = _clean_num(number)
+    return any(_clean_num(s.get("number")) == target for s in (data.get("shipments") or []))
+
+
 def parse_restapi_payload(
     data: dict,
     number: str,
@@ -50,13 +61,26 @@ def parse_restapi_payload(
 
     Pure function (no browser) so it can be unit-tested against a real payload.
     Returns None when the number isn't trackable / has no data yet.
+
+    Crucially, we pick the shipment whose number MATCHES the requested one — the
+    response can contain 17track's default sample shipment or a stale result, and
+    relabelling that with the user's number is exactly the "wrong data" bug. If no
+    shipment matches, return None (→ honest "not found") rather than guess.
     """
     shipments = data.get("shipments") or []
     if not shipments:
         meta = data.get("meta") or {}
         raise ProviderError(f"17track returned no shipments (meta {meta.get('code')})")
 
-    ship = shipments[0]
+    target = _clean_num(number)
+    ship = next((s for s in shipments if _clean_num(s.get("number")) == target), None)
+    if ship is None:
+        logger.info(
+            "scrape: response had no shipment for %s (got %s) — treating as not found",
+            number, [s.get("number") for s in shipments],
+        )
+        return None
+
     if ship.get("code") not in (200, 0, None):
         return None  # e.g. 400/404 → not trackable
 
@@ -244,20 +268,55 @@ class _BrowserWorker:
                     pass
 
             page.fill(_TEXTAREA, number)
-            with page.expect_response(
-                lambda r: _RESTAPI_MARK in r.url and r.request.method == "POST",
-                timeout=timeout_ms,
-            ) as resp_info:
-                page.locator(_TRACK_BTN).first.click(timeout=timeout_ms)
-            resp = resp_info.value
-            if resp.status != 200:
-                raise ProviderError(f"17track restapi returned HTTP {resp.status}")
-            return resp.json()
+            return self._capture_for_number(page, number, timeout_ms)
         finally:
             try:
                 page.close()
             except Exception:
                 pass
+
+    def _capture_for_number(self, page, number: str, timeout_ms: int) -> dict:
+        """Click Track and return the restapi payload that matches `number`.
+
+        The page can emit restapi responses for 17track's default *sample*
+        shipment or stale lookups (especially on a slow, Cloudflare-throttled VPS,
+        where they can win the race). We keep reading responses until one actually
+        contains the requested number; if none arrives in time we fail loudly
+        (→ honest "not found") instead of returning someone else's parcel.
+        """
+        from playwright.sync_api import TimeoutError as PWTimeout
+
+        deadline = time.monotonic() + timeout_ms / 1000
+        clicked = False
+        while True:
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining < 1500:
+                break
+            try:
+                with page.expect_response(
+                    lambda r: _RESTAPI_MARK in r.url and r.request.method == "POST",
+                    timeout=remaining,
+                ) as resp_info:
+                    if not clicked:
+                        page.locator(_TRACK_BTN).first.click(timeout=timeout_ms)
+                        clicked = True
+                resp = resp_info.value
+            except PWTimeout:
+                break
+            if resp.status != 200:
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+            if response_has_number(data, number):
+                logger.info("scrape: captured matching tracking response for %s", number)
+                return data
+            logger.info(
+                "scrape: ignoring response not for %s (got %s)",
+                number, [s.get("number") for s in (data.get("shipments") or [])],
+            )
+        raise ProviderError(f"no tracking response for {number} (blocked or not found)")
 
     def _ensure_cleared(self, page) -> None:
         """Ensure we're past Cloudflare and the search box is present.
