@@ -45,13 +45,34 @@ class TwoCaptchaSolver:
         data: Optional[str] = None,
         pagedata: Optional[str] = None,
         user_agent: Optional[str] = None,
+        proxy: Optional[dict] = None,
     ) -> str:
-        """Solve a Cloudflare Turnstile / Challenge and return the token."""
-        task: dict = {
-            "type": "TurnstileTaskProxyless",
-            "websiteURL": website_url,
-            "websiteKey": website_key,
-        }
+        """Solve a Cloudflare Turnstile / Challenge and return the token.
+
+        If `proxy` (parsed dict from SCRAPE_PROXY) is given, the solve runs through
+        that proxy so the token is bound to the SAME IP as our browser — otherwise
+        a proxyless solve runs on 2Captcha's IP (may not satisfy Cloudflare).
+        """
+        if proxy and proxy.get("host"):
+            scheme = proxy.get("scheme") or "http"
+            task: dict = {
+                "type": "TurnstileTask",
+                "websiteURL": website_url,
+                "websiteKey": website_key,
+                "proxyType": scheme if scheme in ("http", "https", "socks4", "socks5") else "http",
+                "proxyAddress": proxy["host"],
+                "proxyPort": proxy.get("port") or 80,
+            }
+            if proxy.get("username"):
+                task["proxyLogin"] = proxy["username"]
+            if proxy.get("password"):
+                task["proxyPassword"] = proxy["password"]
+        else:
+            task = {
+                "type": "TurnstileTaskProxyless",
+                "websiteURL": website_url,
+                "websiteKey": website_key,
+            }
         # Extra fields are required for Cloudflare *Challenge* pages.
         if action:
             task["action"] = action

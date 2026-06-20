@@ -83,9 +83,34 @@ SOLVER_TIMEOUT=180
 > **About the solver.** A real browser clears most Cloudflare challenges on its
 > own; the solver only kicks in when it can't. The solved token is generated on
 > 2Captcha's IP (proxyless), while Cloudflare often binds clearance to *your*
-> server's IP — so it helps but isn't guaranteed from a datacenter VPS. If
-> lookups still fail, set `SCRAPE_PROXY` to a residential proxy (then the browser
-> clears Cloudflare directly and the solver is rarely needed).
+> server's IP — so it helps but isn't guaranteed from a datacenter VPS. The
+> reliable fix on a VPS is a residential proxy ↓ (then the browser clears
+> Cloudflare directly and the solver is rarely needed).
+
+### Residential proxy (the reliable way to scrape from a VPS)
+
+A datacenter/VPS IP gets challenged hard by Cloudflare. Routing the browser
+through a **residential proxy** makes it look like a home connection.
+
+1. Get a residential proxy from a provider (e.g. IPRoyal, Smartproxy, Oxylabs,
+   Bright Data). **Use a "sticky"/"session" endpoint** — the IP must stay the
+   same for the life of the browser, or the cleared Cloudflare cookie keeps
+   getting invalidated. They give you a URL like `http://user:pass@gateway:port`.
+2. Put it in `/opt/trackbox/.env` (or `/root/workspace/TrackBox/.env`):
+   ```ini
+   SCRAPE_PROXY=http://user:pass@gateway:port
+   ```
+   URL-encode any special characters in the username/password (e.g. `@` → `%40`).
+3. `systemctl restart trackbox`, then watch a lookup:
+   ```bash
+   journalctl -u trackbox -f
+   # "scrape: using proxy http://gateway:port"
+   # "scrape: captured matching tracking response for <num>"  ← real data 🎉
+   ```
+
+If it works, the proxy (not the solver) is doing the heavy lifting; you can keep
+`SOLVER_*` set as a backup. If it still fails, the proxy is likely rotating per
+request — switch to a sticky/session IP from your provider.
 
 > **Ports.** `APP_PORT` is the *internal* port the app listens on; Nginx proxies
 > to it, so end users never see it (they hit ports 80/443). If you change

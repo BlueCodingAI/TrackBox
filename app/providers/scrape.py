@@ -51,6 +51,28 @@ def response_has_number(data: dict, number: str) -> bool:
     return any(_clean_num(s.get("number")) == target for s in (data.get("shipments") or []))
 
 
+def parse_proxy(url: str) -> Optional[dict]:
+    """Parse SCRAPE_PROXY (e.g. http://user:pass@host:port) into parts.
+
+    Shared by the browser context and the captcha solver so both use the SAME
+    egress IP (critical for Cloudflare clearance).
+    """
+    url = (url or "").strip()
+    if not url:
+        return None
+    from urllib.parse import unquote
+    u = urlparse(url if "://" in url else f"http://{url}")
+    if not u.hostname:
+        return None
+    return {
+        "scheme": (u.scheme or "http").lower(),
+        "host": u.hostname,
+        "port": u.port,
+        "username": unquote(u.username) if u.username else None,
+        "password": unquote(u.password) if u.password else None,
+    }
+
+
 def parse_restapi_payload(
     data: dict,
     number: str,
@@ -207,18 +229,18 @@ class _BrowserWorker:
 
     def _context_kwargs(self) -> dict:
         """Optional outbound proxy for the browser context."""
-        proxy = self._settings.scrape_proxy.strip()
-        if not proxy:
+        pr = parse_proxy(self._settings.scrape_proxy)
+        if not pr:
             return {}
-        u = urlparse(proxy)
-        server = f"{u.scheme or 'http'}://{u.hostname}"
-        if u.port:
-            server += f":{u.port}"
+        server = f"{pr['scheme']}://{pr['host']}"
+        if pr["port"]:
+            server += f":{pr['port']}"
         cfg = {"server": server}
-        if u.username:
-            cfg["username"] = u.username
-        if u.password:
-            cfg["password"] = u.password
+        if pr["username"]:
+            cfg["username"] = pr["username"]
+        if pr["password"]:
+            cfg["password"] = pr["password"]
+        logger.info("scrape: using proxy %s", server)
         return {"proxy": cfg}
 
     def _launch(self, p):
@@ -288,6 +310,7 @@ class _BrowserWorker:
 
         deadline = time.monotonic() + timeout_ms / 1000
         clicked = False
+        seen = 0  # how many restapi responses we observed (for diagnosis)
         while True:
             remaining = int((deadline - time.monotonic()) * 1000)
             if remaining < 1500:
@@ -298,16 +321,24 @@ class _BrowserWorker:
                     timeout=remaining,
                 ) as resp_info:
                     if not clicked:
-                        page.locator(_TRACK_BTN).first.click(timeout=timeout_ms)
+                        try:
+                            page.locator(_TRACK_BTN).first.click(timeout=timeout_ms)
+                            logger.info("scrape: clicked Track for %s", number)
+                        except Exception as exc:  # noqa: BLE001
+                            raise ProviderError(f"Track button click failed: {exc}") from exc
                         clicked = True
                 resp = resp_info.value
             except PWTimeout:
                 break
+            seen += 1
             if resp.status != 200:
+                # A 403/503 here means Cloudflare is blocking the API call itself.
+                logger.info("scrape: restapi response HTTP %s (ignored)", resp.status)
                 continue
             try:
                 data = resp.json()
             except Exception:
+                logger.info("scrape: restapi response was not JSON (likely a challenge page)")
                 continue
             if response_has_number(data, number):
                 logger.info("scrape: captured matching tracking response for %s", number)
@@ -316,7 +347,10 @@ class _BrowserWorker:
                 "scrape: ignoring response not for %s (got %s)",
                 number, [s.get("number") for s in (data.get("shipments") or [])],
             )
-        raise ProviderError(f"no tracking response for {number} (blocked or not found)")
+        raise ProviderError(
+            f"no tracking response for {number} after {seen} restapi response(s); "
+            f"click={'ok' if clicked else 'FAILED'} (Cloudflare/anti-bot likely blocking this IP)"
+        )
 
     def _ensure_cleared(self, page) -> None:
         """Ensure we're past Cloudflare and the search box is present.
@@ -330,6 +364,7 @@ class _BrowserWorker:
         # 1) Fast path — did the browser clear the challenge by itself?
         try:
             page.wait_for_selector(_TEXTAREA, timeout=12000)
+            logger.info("scrape: search box ready (Cloudflare cleared on its own)")
             return
         except Exception:
             pass
@@ -337,6 +372,7 @@ class _BrowserWorker:
         # 2) Still blocked. Without a solver, give it the remaining time then
         #    let the caller's flow fail if it never clears.
         if self._solver is None:
+            logger.info("scrape: still on Cloudflare challenge; no solver configured")
             page.wait_for_selector(_TEXTAREA, timeout=full_ms)
             return
 
@@ -347,12 +383,14 @@ class _BrowserWorker:
             params = None
         if not params:
             # No capturable Turnstile (some challenges don't use one).
+            logger.info("scrape: blocked, but no Turnstile widget captured (non-Turnstile challenge?)")
             page.wait_for_selector(_TEXTAREA, timeout=full_ms)
             return
 
         logger.info("scrape: Cloudflare challenge detected — solving via %s", self._solver.name)
         try:
-            token = self._solver.solve_turnstile(**params)
+            # Solve from the same egress IP as the browser when a proxy is set.
+            token = self._solver.solve_turnstile(**params, proxy=parse_proxy(self._settings.scrape_proxy))
         except SolverError as exc:
             raise ProviderError(f"captcha solve failed: {exc}") from exc
 

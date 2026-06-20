@@ -133,6 +133,17 @@ def test_scrape_fallback_mock_adds_mock():
     assert [p.name for p in chain] == ["scrape", "mock"]
 
 
+def test_parse_proxy():
+    from app.providers.scrape import parse_proxy
+    assert parse_proxy("") is None
+    assert parse_proxy("   ") is None
+    p = parse_proxy("http://user:p%40ss@gw.example.com:8080")
+    assert p["scheme"] == "http" and p["host"] == "gw.example.com" and p["port"] == 8080
+    assert p["username"] == "user" and p["password"] == "p@ss"   # %40 → @ (decoded)
+    p2 = parse_proxy("gw.example.com:1234")   # scheme optional
+    assert p2["scheme"] == "http" and p2["host"] == "gw.example.com" and p2["port"] == 1234
+
+
 def test_get_solver_factory():
     from app.providers.solver import TwoCaptchaSolver, get_solver
     assert get_solver(Settings(solver_provider="", solver_api_key="")) is None
