@@ -122,8 +122,20 @@ def test_scrape_payload_not_trackable_returns_none():
     assert parse_restapi_payload({"shipments": [{"code": 404}]}, "X12345", None, False) is None
 
 
-def test_scrape_mode_chain_has_scrape_then_mock():
-    chain = build_chain(Settings(provider_mode="scrape"))
-    names = [p.name for p in chain]
-    assert names == ["scrape", "mock"]
+def test_scrape_mode_is_scrape_only_by_default():
+    chain = build_chain(Settings(provider_mode="scrape", scrape_fallback_mock=False))
+    assert [p.name for p in chain] == ["scrape"]   # no demo fallback
     assert isinstance(chain[0], ScrapeProvider)
+
+
+def test_scrape_fallback_mock_adds_mock():
+    chain = build_chain(Settings(provider_mode="scrape", scrape_fallback_mock=True))
+    assert [p.name for p in chain] == ["scrape", "mock"]
+
+
+def test_get_solver_factory():
+    from app.providers.solver import TwoCaptchaSolver, get_solver
+    assert get_solver(Settings(solver_provider="", solver_api_key="")) is None
+    assert get_solver(Settings(solver_provider="twocaptcha", solver_api_key="")) is None
+    s = get_solver(Settings(solver_provider="twocaptcha", solver_api_key="abc"))
+    assert isinstance(s, TwoCaptchaSolver)

@@ -25,15 +25,20 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 import queue
 import threading
 from concurrent.futures import Future
 from typing import Optional
+from urllib.parse import urlparse
 
 from ..config import Settings
 from ..models import TrackResult
 from ..normalize import normalize_official
 from .base import ProviderError, TrackingProvider
+from .solver import SolverError, get_solver
+
+logger = logging.getLogger("tracking_api.scrape")
 
 def parse_restapi_payload(
     data: dict,
@@ -79,6 +84,39 @@ _UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
 )
 
+# Injected before page scripts. When Cloudflare assigns window.turnstile we wrap
+# render() to capture the challenge params (sitekey, cData, chlPageData, action)
+# and stash the callback, so a solver can produce a token and we complete the
+# challenge by calling window.__tsCallback(token).
+_TURNSTILE_HOOK = """
+(() => {
+  let _ts;
+  try {
+    Object.defineProperty(window, 'turnstile', {
+      configurable: true,
+      get() { return _ts; },
+      set(v) {
+        _ts = v;
+        try {
+          if (v && typeof v.render === 'function' && !v.__hooked) {
+            v.render = (a, b) => {
+              window.__cfChallenge = {
+                website_key: b.sitekey, website_url: location.href,
+                data: b.cData, pagedata: b.chlPageData,
+                action: b.action, user_agent: navigator.userAgent
+              };
+              window.__tsCallback = b.callback;
+              return 'cf-intercepted';
+            };
+            v.__hooked = true;
+          }
+        } catch (e) {}
+      }
+    });
+  } catch (e) {}
+})();
+"""
+
 
 class _BrowserWorker:
     """Owns Playwright + a persistent browser context in a single thread."""
@@ -89,6 +127,7 @@ class _BrowserWorker:
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
         self._fatal: Optional[str] = None
+        self._solver = get_solver(settings)
         atexit.register(self.shutdown)
 
     # ── public API (called from the event-loop thread) ──────────────────────
@@ -129,16 +168,34 @@ class _BrowserWorker:
                 ctx = browser.new_context(
                     user_agent=_UA, locale="en-US",
                     viewport={"width": 1366, "height": 900},
+                    **self._context_kwargs(),
                 )
                 ctx.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
+                ctx.add_init_script(_TURNSTILE_HOOK)
                 self._loop(ctx)
                 ctx.close()
                 browser.close()
         except Exception as exc:  # launch failed (e.g. no browser installed)
             self._fatal = f"browser launch failed: {exc}"
             self._drain_with_error()
+
+    def _context_kwargs(self) -> dict:
+        """Optional outbound proxy for the browser context."""
+        proxy = self._settings.scrape_proxy.strip()
+        if not proxy:
+            return {}
+        u = urlparse(proxy)
+        server = f"{u.scheme or 'http'}://{u.hostname}"
+        if u.port:
+            server += f":{u.port}"
+        cfg = {"server": server}
+        if u.username:
+            cfg["username"] = u.username
+        if u.password:
+            cfg["password"] = u.password
+        return {"proxy": cfg}
 
     def _launch(self, p):
         timeout_ms = int(self._settings.scrape_timeout * 1000)
@@ -176,7 +233,7 @@ class _BrowserWorker:
         page = ctx.new_page()
         try:
             page.goto(_HOMEPAGE, wait_until="load", timeout=timeout_ms)
-            page.wait_for_selector(_TEXTAREA, timeout=timeout_ms)
+            self._ensure_cleared(page)
 
             # dismiss the promo banner so it can't intercept the TRACK click
             for sel in ("[class*=BannerReport_closeBtn]", "[class*=closeBtn]"):
@@ -201,6 +258,51 @@ class _BrowserWorker:
                 page.close()
             except Exception:
                 pass
+
+    def _ensure_cleared(self, page) -> None:
+        """Ensure we're past Cloudflare and the search box is present.
+
+        The real browser usually clears the challenge on its own. If it doesn't
+        and a solver is configured, solve the captured Turnstile and inject the
+        token to complete the challenge.
+        """
+        full_ms = int(self._settings.scrape_timeout * 1000)
+
+        # 1) Fast path — did the browser clear the challenge by itself?
+        try:
+            page.wait_for_selector(_TEXTAREA, timeout=12000)
+            return
+        except Exception:
+            pass
+
+        # 2) Still blocked. Without a solver, give it the remaining time then
+        #    let the caller's flow fail if it never clears.
+        if self._solver is None:
+            page.wait_for_selector(_TEXTAREA, timeout=full_ms)
+            return
+
+        params = None
+        try:
+            params = page.evaluate("() => window.__cfChallenge || null")
+        except Exception:
+            params = None
+        if not params:
+            # No capturable Turnstile (some challenges don't use one).
+            page.wait_for_selector(_TEXTAREA, timeout=full_ms)
+            return
+
+        logger.info("scrape: Cloudflare challenge detected — solving via %s", self._solver.name)
+        try:
+            token = self._solver.solve_turnstile(**params)
+        except SolverError as exc:
+            raise ProviderError(f"captcha solve failed: {exc}") from exc
+
+        try:
+            page.evaluate("(t) => { if (window.__tsCallback) window.__tsCallback(t); }", token)
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderError(f"failed to inject captcha token: {exc}") from exc
+
+        page.wait_for_selector(_TEXTAREA, timeout=full_ms)
 
     def _drain_with_error(self) -> None:
         while True:
@@ -229,10 +331,11 @@ class ScrapeProvider(TrackingProvider):
         worker = ScrapeProvider._worker
         assert worker is not None
         fut = worker.submit(number, carrier)
+        budget = self.settings.scrape_timeout + 20
+        if self.settings.solver_enabled:
+            budget += self.settings.solver_timeout  # solving a challenge takes time
         try:
-            data = await asyncio.wait_for(
-                asyncio.wrap_future(fut), timeout=self.settings.scrape_timeout + 15
-            )
+            data = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=budget)
         except asyncio.TimeoutError as exc:
             raise ProviderError("scrape timed out") from exc
         except ProviderError:

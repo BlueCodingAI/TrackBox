@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     scrape_headless: bool = True
     scrape_timeout: float = 45.0
     scrape_browser_channel: str = "msedge"  # system Edge; falls back to chromium
+    # When True, fall back to demo data if a scrape fails. Default False so
+    # scrape mode returns real data or an honest "not found" — never fake data.
+    scrape_fallback_mock: bool = False
+    # Optional outbound proxy for the browser (e.g. http://user:pass@host:port).
+    # A residential proxy greatly improves Cloudflare clearance from a VPS.
+    scrape_proxy: str = ""
+
+    # ── captcha / Cloudflare solver (used by scrape mode when blocked) ────────
+    solver_provider: str = ""   # "twocaptcha" (or empty to disable)
+    solver_api_key: str = ""
+    solver_timeout: float = 180.0
+
+    @property
+    def solver_enabled(self) -> bool:
+        return bool(self.solver_provider.strip() and self.solver_api_key.strip())
 
     @property
     def mode(self) -> str:

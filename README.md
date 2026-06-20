@@ -41,7 +41,7 @@ The backend uses a **provider chain** so it works today and upgrades cleanly:
 
 | Mode (`PROVIDER_MODE`) | Behaviour |
 |---|---|
-| `scrape` *(default in `.env`)* | **Real data, no API key.** Drives a headless browser to clear 17track's Cloudflare and capture the live tracking JSON. Falls back to demo data if it fails. See below. |
+| `scrape` *(default in `.env`)* | **Real data, no API key.** Drives a headless browser to clear 17track's Cloudflare and capture the live tracking JSON. No demo fallback by default; optional captcha solver when blocked. See below. |
 | `auto` | Official API if a key is set, else the public HTTP endpoint — **always** falls back to demo data. |
 | `mock` | Realistic, deterministic demo data. No network. |
 | `official` | Official [17track API](https://api.17track.net) only. Requires `SEVENTEENTRACK_API_KEY`. |
@@ -67,11 +67,26 @@ the `py17track` library disabled its anonymous tracker).
 A dedicated worker thread keeps one browser context alive, so Cloudflare clearance
 is reused across lookups (first lookup ~5–10s, later ones faster).
 
+**Captcha solver (optional).** If the browser can't clear Cloudflare on its own,
+a solver can be used: the Turnstile challenge is captured, sent to the solver,
+and the returned token is injected. Configure in `.env`:
+```ini
+SOLVER_PROVIDER=twocaptcha
+SOLVER_API_KEY=your_2captcha_key
+```
+The solved token is generated on the solver's IP, while Cloudflare often binds
+clearance to *your* IP — so it helps but isn't guaranteed from a datacenter/VPS.
+If it still fails, add a residential proxy (`SCRAPE_PROXY=http://user:pass@host:port`)
+so the browser clears Cloudflare directly.
+
+By default scrape mode has **no demo fallback** — it returns real data or an
+honest "not found". Set `SCRAPE_FALLBACK_MOCK=true` to fall back to demo data.
+
 > ⚠️ **Honest caveats.** This is inherently fragile and best-effort: it depends on
 > 17track's page structure and Cloudflare behaviour, it's slower than an API, it
-> may be rate-limited or blocked on repeated requests, and scraping is against
-> 17track's ToS. It works now, but expect occasional failures (they degrade to
-> demo data). For production-grade reliability, use the free official API below.
+> may be rate-limited or blocked on repeated requests (especially from a VPS IP),
+> and scraping is against 17track's ToS. For production-grade reliability, use the
+> free official API below.
 
 **Browser requirement:** uses your system **Edge** by default (no download). If
 Edge isn't present, install Playwright's Chromium once:

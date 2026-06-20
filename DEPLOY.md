@@ -66,13 +66,26 @@ Set these for a Linux server (no Edge here → use bundled Chromium):
 PROVIDER_MODE=scrape
 SCRAPE_BROWSER_CHANNEL=        # empty = use the Chromium installed in step 5
 SCRAPE_HEADLESS=true
-ENABLE_DOCS=false              # keep the API docs hidden from users
+SCRAPE_FALLBACK_MOCK=false     # real data or honest "not found" — never fake data
+ENABLE_DOCS=false             # keep the API docs hidden from users
 INCLUDE_RAW=false
 APP_PORT=8080                  # internal uvicorn port — change if 8080 is taken
-# For reliable data (recommended for production), instead use:
-# PROVIDER_MODE=auto
-# SEVENTEENTRACK_API_KEY=your_free_key
+
+# Captcha/Cloudflare solver — used only when the browser can't clear Cloudflare.
+SOLVER_PROVIDER=twocaptcha
+SOLVER_API_KEY=your_2captcha_key
+SOLVER_TIMEOUT=180
+# If solving still fails from the VPS (token bound to a different IP), add a
+# residential proxy so the browser itself clears Cloudflare:
+# SCRAPE_PROXY=http://user:pass@host:port
 ```
+
+> **About the solver.** A real browser clears most Cloudflare challenges on its
+> own; the solver only kicks in when it can't. The solved token is generated on
+> 2Captcha's IP (proxyless), while Cloudflare often binds clearance to *your*
+> server's IP — so it helps but isn't guaranteed from a datacenter VPS. If
+> lookups still fail, set `SCRAPE_PROXY` to a residential proxy (then the browser
+> clears Cloudflare directly and the solver is rarely needed).
 
 > **Ports.** `APP_PORT` is the *internal* port the app listens on; Nginx proxies
 > to it, so end users never see it (they hit ports 80/443). If you change

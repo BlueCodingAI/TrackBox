@@ -36,8 +36,13 @@ def build_chain(settings: Settings) -> list[TrackingProvider]:
     if mode == "web":
         return [WebProvider(settings)]
     if mode == "scrape":
-        # Real data via headless browser; demo fallback if it fails/blocks.
-        return [ScrapeProvider(settings), mock]
+        # Real data via headless browser. By default NO demo fallback — return
+        # real data or an honest "not found". Enable SCRAPE_FALLBACK_MOCK=true to
+        # fall back to demo data when a scrape fails/blocks.
+        chain: list[TrackingProvider] = [ScrapeProvider(settings)]
+        if settings.scrape_fallback_mock:
+            chain.append(mock)
+        return chain
 
     # auto
     chain: list[TrackingProvider] = []
