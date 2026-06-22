@@ -1,0 +1,30 @@
+{
+  "states": [
+    {"location": "Longview, TX, US", "date": "2025-12-05T10:29:00Z", "carrier": 0, "status": "DELIVERED"},
+    {"location": "Longview, TX, US", "date": "2025-12-05T10:20:00Z", "carrier": 0, "status": "OUT FOR DELIVERY TODAY"},
+    {"location": "Longview, TX, US", "date": "2025-12-05T09:26:00Z", "carrier": 0, "status": "Processing at UPS Facility"},
+    {"location": "Longview, TX, US", "date": "2025-12-05T09:16:00Z", "carrier": 0, "status": "Arrived at Facility"},
+    {"location": "Shreveport, LA, US", "date": "2025-12-05T08:01:00Z", "carrier": 0, "status": "Departed from Facility"},
+    {"location": "Little Rock, AR, US", "date": "2025-12-05T05:13:00Z", "carrier": 0, "status": "Arrived at Facility"},
+    {"location": "Louisville, KY, US", "date": "2025-12-05T04:34:00Z", "carrier": 0, "status": "Departed from Facility"},
+    {"location": "Los Angeles, CA, US", "date": "2025-06-12T13:36:00Z", "carrier": 0, "status": "Drop-Off"}
+  ],
+  "to": "Longview, TX",
+  "weight": "8 oz.",
+  "carriers": ["UPS"],
+  "externalTracking": [
+    {"url": "https://www.ups.com/track?loc=en_US&tracknum=1Z999AA10123456784&requester=WT/trackdetails", "slug": "ups", "method": "GET"}
+  ],
+  "attributes": [
+    {"l": "attr", "n": "Shipping Type", "val": "UPS Express™ 12:00"},
+    {"l": "days_transit", "n": "Days in transit", "val": "175"}
+  ],
+  "services": [{"slug": "ups", "name": "UPS"}],
+  "detected": [0],
+  "detectedCarrier": {"name": "UPS", "slug": "ups"},
+  "carrier": 0,
+  "checkedCountry": "Russia",
+  "checkedCountryCode": "RU",
+  "status": "archive",
+  "sub_status": "delivered"
+}

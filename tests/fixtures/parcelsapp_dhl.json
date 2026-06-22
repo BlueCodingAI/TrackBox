@@ -1,0 +1,17 @@
+{
+  "states": [
+    {"date": "2026-06-18T18:37:28Z", "carrier": 0, "status": "Die Sendung wurde zugestellt"},
+    {"date": "2026-06-18T08:59:02Z", "carrier": 0, "status": "Die Sendung wurde in das Zustellfahrzeug geladen. Die Zustellung  erfolgt voraussichtlich heute"},
+    {"date": "2026-06-18T06:04:33Z", "carrier": 0, "status": "Die Sendung ist in der Region des Empfängers angekommen und wird im nächsten Schritt zur Zustellbasis transportiert"},
+    {"date": "2026-06-17T11:28:58Z", "carrier": 0, "status": "Die Sendung wurde von DHL bearbeitet und wird für den Weitertransport in die Region des Empfängers vorbereitet"},
+    {"date": "2026-06-08T02:03:39Z", "carrier": 0, "status": "Die Sendung befindet sich im Weitertransport zu DHL"},
+    {"date": "2026-06-07T17:53:59Z", "carrier": 0, "status": "Die Sendung wurde elektronisch angekündigt. Sobald die Sendung von uns bearbeitet wurde, erhalten Sie weitere Informationen"}
+  ],
+  "carriers": ["Deutsche Post - DHL Paket"],
+  "externalTracking": [
+    {"url": "https://www.dhl.de/en/privatkunden/pakete-empfangen/verfolgen.html?piececode=00340434657256528415", "slug": "deutsche-post", "method": "GET"}
+  ],
+  "sub_status": "delivered",
+  "status": "archive",
+  "services": [{"slug": "deutsche-post", "name": "Deutsche Post - DHL Paket"}]
+}

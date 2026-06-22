@@ -1,20 +1,20 @@
 # Deploying TrackBox to an Ubuntu VPS
 
 FastAPI + uvicorn, behind Nginx, managed by systemd. The default `scrape` mode
-drives a **headless Chromium**, so the server needs the browser and its system
-libraries (steps 4–5). Templates live in [`deploy/`](deploy/).
+drives a **real headless browser** against parcelsapp.com, so the server needs a
+browser and its system libraries (steps 4–5). Templates live in [`deploy/`](deploy/).
 
-> **⚠️ Read this first — datacenter IP + Cloudflare.**
-> `scrape` mode works by clearing 17track's Cloudflare in a real browser. From a
-> **datacenter/VPS IP**, Cloudflare challenges much more aggressively than from a
-> home connection, so scraping may be blocked more often (it degrades to demo
-> data automatically). For **reliable production data**, use the free official
-> API instead: set `PROVIDER_MODE=auto` and add a free `SEVENTEENTRACK_API_KEY`
-> (100 free lookups, from https://api.17track.net). You can run both — `auto`
-> with a key is the dependable path.
+> **⚠️ Read this first — you need a real browser channel (Chrome/Edge).**
+> parcelsapp **detects bundled headless Chromium** (the `sec-ch-ua` brand leaks
+> `"HeadlessChrome"`) and returns `{"error":"NO_DATA"}`. You must install **Google
+> Chrome** (or Edge) on the server and set `SCRAPE_BROWSER_CHANNEL=chrome` — see
+> steps 4–6. From a **datacenter/VPS IP** parcelsapp may also rate-limit; a
+> residential `SCRAPE_PROXY` makes it reliable. For a fully dependable path you
+> can instead use the free official API: `PROVIDER_MODE=auto` +
+> `SEVENTEENTRACK_API_KEY` (100 free lookups, https://api.17track.net).
 
 Assumes Ubuntu 22.04 / 24.04 and a sudo user. **≥1 GB RAM** (2 GB recommended —
-headless Chromium is memory hungry).
+a headless browser is memory hungry).
 
 ---
 
@@ -46,57 +46,53 @@ sudo -u trackbox .venv/bin/pip install --upgrade pip
 sudo -u trackbox .venv/bin/pip install -r requirements.txt
 ```
 
-## 4. Install the headless browser system libraries (root)
+## 4. Install browser system libraries (root)
 ```bash
 sudo /opt/trackbox/.venv/bin/playwright install-deps
 ```
 
-## 5. Download Chromium **as the app user** (so it lands in its HOME)
+## 5. Install **Google Chrome** as the app user (required — see the warning above)
+parcelsapp blocks bundled headless Chromium, so install the real Chrome channel:
 ```bash
-sudo -u trackbox HOME=/opt/trackbox /opt/trackbox/.venv/bin/playwright install chromium
+sudo -u trackbox HOME=/opt/trackbox /opt/trackbox/.venv/bin/playwright install chrome
 ```
+(If `install chrome` is unavailable on your distro, install Google Chrome via apt
+— `google-chrome-stable` — and Playwright's `channel=chrome` will find it.)
 
 ## 6. Configure `.env`
 ```bash
 sudo -u trackbox cp /opt/trackbox/.env.example /opt/trackbox/.env
 sudo -u trackbox nano /opt/trackbox/.env
 ```
-Set these for a Linux server (no Edge here → use bundled Chromium):
+Set these for a Linux server (use the real Chrome channel from step 5):
 ```ini
 PROVIDER_MODE=scrape
-SCRAPE_BROWSER_CHANNEL=        # empty = use the Chromium installed in step 5
+SCRAPE_BROWSER_CHANNEL=chrome  # real Chrome — bundled Chromium is blocked by parcelsapp
 SCRAPE_HEADLESS=true
 SCRAPE_FALLBACK_MOCK=false     # real data or honest "not found" — never fake data
 ENABLE_DOCS=false             # keep the API docs hidden from users
 INCLUDE_RAW=false
 APP_PORT=8080                  # internal uvicorn port — change if 8080 is taken
 
-# Captcha/Cloudflare solver — used only when the browser can't clear Cloudflare.
-SOLVER_PROVIDER=twocaptcha
-SOLVER_API_KEY=your_2captcha_key
-SOLVER_TIMEOUT=180
-# If solving still fails from the VPS (token bound to a different IP), add a
-# residential proxy so the browser itself clears Cloudflare:
+# Recommended on a VPS — parcelsapp may rate-limit datacenter IPs:
 # SCRAPE_PROXY=http://user:pass@host:port
 ```
 
-> **About the solver.** A real browser clears most Cloudflare challenges on its
-> own; the solver only kicks in when it can't. The solved token is generated on
-> 2Captcha's IP (proxyless), while Cloudflare often binds clearance to *your*
-> server's IP — so it helps but isn't guaranteed from a datacenter VPS. The
-> reliable fix on a VPS is a residential proxy ↓ (then the browser clears
-> Cloudflare directly and the solver is rarely needed).
+> **Why a real browser channel?** parcelsapp inspects the `sec-ch-ua` client-hint
+> brand; bundled headless Chromium reports `"HeadlessChrome"` and is served no
+> data. The Chrome/Edge channel reports a genuine brand even when headless, which
+> is what returns live results.
 
-### Residential proxy (the reliable way to scrape from a VPS)
+### Residential proxy (recommended from a VPS)
 
-A datacenter/VPS IP gets challenged hard by Cloudflare. Routing the browser
-through a **residential proxy** makes it look like a home connection.
+A datacenter/VPS IP can get rate-limited or blocked by parcelsapp. Routing the
+browser through a **residential proxy** makes it look like a home connection.
 
 1. Get a residential proxy from a provider (e.g. IPRoyal, Smartproxy, Oxylabs,
-   Bright Data). **Use a "sticky"/"session" endpoint** — the IP must stay the
-   same for the life of the browser, or the cleared Cloudflare cookie keeps
-   getting invalidated. They give you a URL like `http://user:pass@gateway:port`.
-2. Put it in `/opt/trackbox/.env` (or `/root/workspace/TrackBox/.env`):
+   Bright Data). A **"sticky"/"session" endpoint** is preferable so the IP stays
+   stable for the life of the browser. They give you a URL like
+   `http://user:pass@gateway:port`.
+2. Put it in `/opt/trackbox/.env`:
    ```ini
    SCRAPE_PROXY=http://user:pass@gateway:port
    ```
@@ -105,12 +101,11 @@ through a **residential proxy** makes it look like a home connection.
    ```bash
    journalctl -u trackbox -f
    # "scrape: using proxy http://gateway:port"
-   # "scrape: captured matching tracking response for <num>"  ← real data 🎉
+   # "scrape: captured parcelsapp response for <num>"  ← real data 🎉
    ```
 
-If it works, the proxy (not the solver) is doing the heavy lifting; you can keep
-`SOLVER_*` set as a backup. If it still fails, the proxy is likely rotating per
-request — switch to a sticky/session IP from your provider.
+If it still fails, the proxy is likely rotating per request — switch to a
+sticky/session IP from your provider.
 
 > **Ports.** `APP_PORT` is the *internal* port the app listens on; Nginx proxies
 > to it, so end users never see it (they hit ports 80/443). If you change
@@ -175,10 +170,10 @@ sudo systemctl restart trackbox
 ## Troubleshooting
 | Symptom | Fix |
 |---|---|
-| `journalctl` shows *"browser launch failed"* | Re-run steps 4 & 5; confirm `SCRAPE_BROWSER_CHANNEL=` is empty. |
+| `journalctl` shows *"browser launch failed"* | Re-run steps 4 & 5; confirm `SCRAPE_BROWSER_CHANNEL=chrome` and that Google Chrome is installed for the `trackbox` user. |
 | Browser deps error (`libnss3` etc.) | `sudo /opt/trackbox/.venv/bin/playwright install-deps`. |
-| Everything returns "not found" | Cloudflare is blocking the VPS IP so the scrape never completes. Add a residential `SCRAPE_PROXY`, or use `PROVIDER_MODE=auto` + a free key. Check `journalctl -u trackbox` for "no tracking response …". |
-| Showed *wrong* parcel's data | Fixed: the scraper now verifies the captured response matches the requested number (ignores 17track's default sample / stale responses). Make sure the deployed code is up to date (`git pull` + restart). |
+| Everything returns "not found" | Most often the browser channel: bundled Chromium is blocked by parcelsapp (`NO_DATA`). Install Chrome and set `SCRAPE_BROWSER_CHANNEL=chrome`. If still blocked, the VPS IP is rate-limited — add a residential `SCRAPE_PROXY`, or use `PROVIDER_MODE=auto` + a free key. Check `journalctl -u trackbox` for "no parcelsapp API response …". |
+| Right courier, wrong/empty data | parcelsapp can guess the wrong origin country for ambiguous numbers and return no data; this is an upstream limitation. Try the official API path for that number. |
 | 502 Bad Gateway | Service not running: `sudo systemctl status trackbox`, check logs. |
 | Lookups time out at proxy | Raise `proxy_read_timeout` in the Nginx config. |
 | High memory / OOM | Keep `--workers 1`; ensure ≥1 GB RAM; the unit caps at `MemoryMax=1500M`. |

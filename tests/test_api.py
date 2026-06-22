@@ -91,35 +91,70 @@ def test_frontend_served():
     assert "TrackBox" in r.text
 
 
-# ── scrape provider: parse a REAL captured t.17track.net/track/restapi payload ──
+# ── scrape provider: parse REAL captured parcelsapp.com/api/v2/parcels payloads ──
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from app.providers import build_chain  # noqa: E402
-from app.providers.scrape import ScrapeProvider, parse_restapi_payload  # noqa: E402
+from app.providers.scrape import ScrapeProvider, parse_parcels_payload  # noqa: E402
 from app.config import Settings  # noqa: E402
 
-_FIXTURE = Path(__file__).parent / "fixtures" / "restapi_dhl.json"
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def test_scrape_payload_parses_real_data():
-    data = json.loads(_FIXTURE.read_text(encoding="utf-8"))
-    result = parse_restapi_payload(data, "00340434498968565356", 7041, include_raw=True)
+def test_scrape_payload_parses_real_dhl_data():
+    data = json.loads((_FIXTURES / "parcelsapp_dhl.json").read_text(encoding="utf-8"))
+    result = parse_parcels_payload(data, "00340434657256528415", include_raw=True)
     assert result is not None
     assert result.source == "scrape"
-    assert result.carrier.code == 7041
-    assert result.carrier.name == "DHL Paket"
-    assert result.status == "InfoReceived"
-    assert result.status_label == "Info Received"
-    assert len(result.events) >= 1
-    assert result.latest_event and "DHL" in (result.latest_event.description or "")
+    assert result.carrier.name == "Deutsche Post - DHL Paket"
+    # archive + sub_status "delivered" → Delivered
+    assert result.status == "Delivered"
+    assert result.status_label == "Delivered"
+    assert result.is_delivered is True
+    assert len(result.events) == 6
+    # newest first, latest is the delivery scan (German text passed through verbatim)
+    assert result.latest_event and "zugestellt" in (result.latest_event.description or "")
+    times = [e.time_utc for e in result.events if e.time_utc]
+    assert times == sorted(times, reverse=True)
     assert len(result.milestones) == 4
-    assert result.milestones[0].reached is True  # InfoReceived reached
+    assert all(m.reached for m in result.milestones)  # delivered → full bar
 
 
-def test_scrape_payload_not_trackable_returns_none():
-    # a shipment with a non-success code → no confident data
-    assert parse_restapi_payload({"shipments": [{"code": 404}]}, "X12345", None, False) is None
+def test_scrape_payload_parses_ups_with_locations_and_metrics():
+    data = json.loads((_FIXTURES / "parcelsapp_ups.json").read_text(encoding="utf-8"))
+    result = parse_parcels_payload(data, "1Z999AA10123456784", include_raw=False)
+    assert result is not None
+    assert result.carrier.name == "UPS"
+    assert result.status == "Delivered"
+    # destination from the "to" field; origin from the oldest located scan
+    assert result.destination and result.destination.city == "Longview"
+    assert result.destination.state == "TX"
+    assert result.origin and result.origin.city == "Los Angeles"
+    # "days_transit" attribute → metrics
+    assert result.metrics and result.metrics.days_of_transit == 175
+    assert result.latest_event.location == "Longview, TX, US"
+
+
+def test_scrape_payload_no_data_returns_none():
+    assert parse_parcels_payload({"error": "NO_DATA"}, "X12345", False) is None
+    assert parse_parcels_payload({"error": "NO_TRACKER", "services": []}, "X12345", False) is None
+    assert parse_parcels_payload({}, "X12345", False) is None
+
+
+def test_scrape_payload_archive_without_delivery_is_not_delivered():
+    # parcelsapp marks stalled shipments "archive" with no delivery sub_status —
+    # must NOT be reported as Delivered.
+    data = {
+        "states": [{"date": "2025-06-14T05:16:19Z", "carrier": 0,
+                    "status": "Pending shipping by the seller"}],
+        "carriers": ["China Post"],
+        "status": "archive",
+    }
+    result = parse_parcels_payload(data, "LX123456789CN", False)
+    assert result is not None
+    assert result.is_delivered is False
+    assert result.status == "Expired"
 
 
 def test_scrape_mode_is_scrape_only_by_default():
