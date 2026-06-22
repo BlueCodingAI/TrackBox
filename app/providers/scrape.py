@@ -12,7 +12,8 @@ Crucial detail: parcelsapp detects headless Chromium (the ``sec-ch-ua`` brand
 leaks ``"HeadlessChrome"``) and answers ``{"error":"NO_DATA"}``. Launching the
 *system Edge* channel (``SCRAPE_BROWSER_CHANNEL=msedge``, the default) reports a
 genuine browser brand and returns real data. The bundled Chromium fallback will
-usually be blocked.
+usually be blocked — so when we fall back to it and only see "no data", we fail
+LOUDLY rather than masquerading that as a clean negative.
 
 Design notes
 ------------
@@ -21,7 +22,8 @@ Design notes
   ONE dedicated daemon thread that owns the Playwright instance + a persistent
   browser context, and jobs are serialized through a queue (a context is not
   concurrency-safe). The async ``track()`` submits a job and awaits its result
-  without blocking the event loop.
+  without blocking the event loop. The worker self-heals: a dead thread or a
+  lost browser/context is respawned on the next request.
 
 This path is inherently best-effort: any failure raises ``ProviderError`` so the
 resolver can return an honest "not found" (or fall back to demo data when
@@ -36,6 +38,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -67,10 +70,6 @@ _TERMINAL_ERRORS = {
 }
 
 
-def _clean_num(s: Optional[str]) -> str:
-    return (s or "").strip().upper().replace(" ", "")
-
-
 def parse_proxy(url: str) -> Optional[dict]:
     """Parse SCRAPE_PROXY (e.g. http://user:pass@host:port) into parts."""
     url = (url or "").strip()
@@ -88,6 +87,17 @@ def parse_proxy(url: str) -> Optional[dict]:
         "username": unquote(u.username) if u.username else None,
         "password": unquote(u.password) if u.password else None,
     }
+
+
+def _is_dead_browser_error(exc: BaseException) -> bool:
+    """True if an exception means the browser/context is gone (recycle worker)."""
+    s = str(exc).lower()
+    return any(
+        k in s for k in (
+            "has been closed", "browser closed", "target closed", "target page",
+            "disconnect", "crashed", "connection closed", "browser has been closed",
+        )
+    )
 
 
 # ── status mapping (parcelsapp → our normalized vocabulary) ──────────────────
@@ -135,19 +145,21 @@ _STATUS_MAP: dict[str, str] = {
 # Best-effort keyword inference from a free-text event description. parcelsapp
 # returns event text in the courier's own language, so we cover the most common
 # English + German phrasings (the courier set most likely to be encountered).
-# Order matters: more specific / later-stage statuses first.
+# Order matters: more specific / later-stage statuses first. Keep tokens SPECIFIC
+# — bare substrings like "in delivery" or "collect" match unrelated transit text.
 _KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("Delivered", (
         "delivered", "zugestellt", "entregado", "entregue", "livré", "consegnat",
-        "доставлен", "已签收", "已投递", "送達", "afgeleverd", "levered",
+        "доставлен", "已签收", "已投递", "送達", "afgeleverd",
     )),
     ("OutForDelivery", (
-        "out for delivery", "zustellfahrzeug", "in delivery", "with delivery courier",
-        "reparto", "en reparto", "livraison en cours", "на доставк", "out for del",
+        "out for delivery", "out for del", "with delivery courier", "zustellfahrzeug",
+        "reparto", "en reparto", "livraison en cours", "на доставк",
     )),
     ("AvailableForPickup", (
-        "available for pickup", "ready for pickup", "abholbereit", "collection",
-        "collect", "pickup point", "filiale", "to be picked up", "awaiting collection",
+        "available for pickup", "ready for pickup", "ready for collection",
+        "awaiting collection", "collect from", "collect your", "abholbereit",
+        "pickup point", "filiale", "to be picked up",
     )),
     ("DeliveryFailure", (
         "delivery attempt", "attempted delivery", "not available", "failed",
@@ -164,15 +176,32 @@ _KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     )),
 ]
 
+# A delivery root + a negation token => a FAILED delivery, not a delivery.
+# Guards "could not be delivered" / "konnte nicht zugestellt werden" from being
+# mis-classified as Delivered by the bare-substring match above.
+_DELIVERY_ROOTS = ("deliver", "zugestellt", "entrega", "entregu", "livr", "consegn")
+_NEGATIONS = (
+    "could not", "couldn't", "can not", "cannot", "can't", "unable", "not be deliver",
+    "not delivered", "was not", "wasn't", "no se pudo", "nicht", "non è stat",
+    "failed", "unsuccessful", "未能", "退回",
+)
+
 
 def _infer_status_from_text(text: Optional[str]) -> Optional[str]:
     t = (text or "").lower()
     if not t:
         return None
+    if any(r in t for r in _DELIVERY_ROOTS) and any(n in t for n in _NEGATIONS):
+        return "DeliveryFailure"
     for status, kws in _KEYWORDS:
         if any(k in t for k in kws):
             return status
     return None
+
+
+# Inferred statuses that are meaningful enough to keep for a terminal "archive"
+# parcel (the rest collapse to "Expired").
+_ARCHIVE_KEEP = {"Delivered", "Exception", "DeliveryFailure", "AvailableForPickup"}
 
 
 def _resolve_status(
@@ -187,15 +216,18 @@ def _resolve_status(
         return _STATUS_MAP[top]
     inferred = _infer_status_from_text(latest_desc)
     if top == "archive":
-        # Terminal/archived: only delivered if we have a positive delivery signal.
-        return "Delivered" if inferred == "Delivered" else "Expired"
+        # Terminal/archived: keep a meaningful inferred signal (delivered,
+        # returned/exception, failed attempt, pickup-ready); otherwise it's an
+        # expired/stalled parcel with no further updates.
+        return inferred if inferred in _ARCHIVE_KEEP else "Expired"
     return inferred or "InTransit"
 
 
 def _infer_stage(description: Optional[str]) -> str:
     """Per-event stage (drives milestone timestamps + timeline dot colour)."""
     st = _infer_status_from_text(description)
-    if st in ("Delivered", "OutForDelivery", "AvailableForPickup", "InfoReceived", "Exception"):
+    if st in ("Delivered", "OutForDelivery", "AvailableForPickup", "InfoReceived",
+              "Exception", "DeliveryFailure"):
         return st
     return "InTransit"
 
@@ -246,12 +278,15 @@ def _days_transit(data: dict) -> Optional[int]:
 
 
 def parse_parcels_payload(
-    data: dict, number: str, include_raw: bool, carrier: Optional[int] = None
+    data: dict, number: str, include_raw: bool
 ) -> Optional[TrackResult]:
     """Parse a ``parcelsapp.com/api/v2/parcels`` JSON body into a TrackResult.
 
     Pure function (no browser) so it can be unit-tested against real payloads.
     Returns ``None`` when parcelsapp has no trackable data for the number.
+
+    (parcelsapp auto-detects the carrier from the number, so there is no carrier
+    hint to honour here — see ``ScrapeProvider.track``.)
     """
     if not isinstance(data, dict):
         return None
@@ -285,14 +320,19 @@ def parse_parcels_payload(
                 address=_addr_from_str(loc),
             )
         )
+    # Stable sort newest-first. Date-less events keep their input order and are
+    # handled separately below (they must not masquerade as the oldest scan).
     events.sort(key=lambda e: e.time_utc or e.time_iso or "", reverse=True)
     if not events:
         return None
 
+    # Use timestamped events to find the genuine oldest scan; fall back to all.
+    timed = [e for e in events if e.time_utc] or events
+
     # Anchor the oldest scan to "InfoReceived" so the milestone bar gets a start
     # time, unless we already inferred a more specific early stage.
-    if events[-1].stage == "InTransit":
-        events[-1].stage = "InfoReceived"
+    if timed[-1].stage == "InTransit":
+        timed[-1].stage = "InfoReceived"
 
     latest = events[0]
     status = _resolve_status(data.get("status"), data.get("sub_status"), latest.description)
@@ -307,9 +347,9 @@ def parse_parcels_payload(
 
     # ── route ────────────────────────────────────────────────────────────────
     destination = _addr_from_str(data.get("to"))
-    # Origin: the oldest scan that carries a physical location.
+    # Origin: the oldest *timestamped* scan that carries a physical location.
     origin = None
-    for e in reversed(events):
+    for e in reversed(timed):
         if e.address is not None:
             origin = e.address
             break
@@ -321,8 +361,6 @@ def parse_parcels_payload(
 
     days_transit = _days_transit(data)
     metrics = Metrics(days_of_transit=days_transit) if days_transit is not None else None
-
-    from datetime import datetime, timezone
 
     result = TrackResult(
         number=number,
@@ -347,14 +385,23 @@ def parse_parcels_payload(
 
 
 class _BrowserWorker:
-    """Owns Playwright + a persistent browser context in a single thread."""
+    """Owns Playwright + a persistent browser context in a single thread.
+
+    Self-healing: a crashed thread or a lost browser/context is respawned on the
+    next ``submit()``. Only a truly unrecoverable condition (Playwright not
+    installed) is treated as a sticky fatal.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._q: "queue.Queue" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
-        self._fatal: Optional[str] = None
+        self._fatal: Optional[str] = None  # sticky ONLY for unrecoverable errors
+        self._wanted_channel = (settings.scrape_browser_channel or "").strip()
+        # True when the configured real-browser channel failed and we fell back to
+        # bundled Chromium — which parcelsapp usually blocks (→ fail loudly).
+        self._fallback_chromium = False
         atexit.register(self.shutdown)
 
     # ── public API (called from the event-loop thread) ──────────────────────
@@ -369,13 +416,17 @@ class _BrowserWorker:
         return fut
 
     def shutdown(self) -> None:
-        if self._thread and self._thread.is_alive():
+        t = self._thread
+        if t and t.is_alive():
             self._q.put(None)
 
     # ── worker thread internals ─────────────────────────────────────────────
     def _ensure_started(self) -> None:
         with self._start_lock:
-            if self._thread is None:
+            if self._fatal:
+                return
+            # Respawn if never started OR if a previous worker died/crashed.
+            if self._thread is None or not self._thread.is_alive():
                 self._thread = threading.Thread(
                     target=self._run, name="scrape-browser", daemon=True
                 )
@@ -386,7 +437,7 @@ class _BrowserWorker:
             from playwright.sync_api import sync_playwright
         except ImportError:
             self._fatal = "Playwright not installed (pip install playwright)"
-            self._drain_with_error()
+            self._drain(self._fatal)
             return
 
         try:
@@ -403,9 +454,14 @@ class _BrowserWorker:
                 self._loop(ctx)
                 ctx.close()
                 browser.close()
-        except Exception as exc:  # launch failed (e.g. no browser installed)
-            self._fatal = f"browser launch failed: {exc}"
-            self._drain_with_error()
+        except Exception as exc:  # launch/context failure — recoverable
+            logger.warning(
+                "scrape: browser worker stopped (%s); will respawn on next request", exc
+            )
+        finally:
+            # Never leave queued jobs hanging: fail any still-pending ones so
+            # their callers get a prompt error (the next request respawns us).
+            self._drain("scrape browser worker restarted — please retry")
 
     def _context_kwargs(self) -> dict:
         """Optional outbound proxy for the browser context."""
@@ -429,19 +485,27 @@ class _BrowserWorker:
         last: Exception | None = None
         # Prefer the system Edge channel (real browser brand — parcelsapp serves
         # NO_DATA to headless Chromium). Fall back to bundled Chromium.
-        for channel in (self._settings.scrape_browser_channel, None):
+        for channel in (self._wanted_channel or None, None):
             try:
                 kwargs = {"headless": self._settings.scrape_headless, "args": args,
                           "timeout": timeout_ms}
                 if channel:
                     kwargs["channel"] = channel
                 browser = p.chromium.launch(**kwargs)
-                logger.info("scrape: launched browser channel=%s", channel or "chromium")
+                self._fallback_chromium = bool(self._wanted_channel) and channel is None
+                if self._fallback_chromium:
+                    logger.warning(
+                        "scrape: configured channel %r unavailable — fell back to bundled "
+                        "Chromium, which parcelsapp usually blocks. Install Edge/Chrome.",
+                        self._wanted_channel,
+                    )
+                else:
+                    logger.info("scrape: launched browser channel=%s", channel or "chromium")
                 return browser
             except Exception as exc:  # noqa: BLE001
                 last = exc
         raise RuntimeError(
-            f"{last}. Install a browser: `python -m playwright install chromium`."
+            f"{last}. Install a browser: `python -m playwright install chrome`."
         )
 
     def _loop(self, ctx) -> None:
@@ -456,9 +520,19 @@ class _BrowserWorker:
                 fut.set_result(self._scrape(ctx, number))
             except Exception as exc:  # noqa: BLE001
                 fut.set_exception(exc)
+                if _is_dead_browser_error(exc):
+                    # The browser/context is gone — exit so the next request
+                    # respawns a fresh one instead of failing every job forever.
+                    logger.warning("scrape: browser/context lost (%s); recycling worker", exc)
+                    return
 
     def _scrape(self, ctx, number: str) -> dict:
+        # Single shared deadline across navigation + polling, so the worker's
+        # hard ceiling stays ~scrape_timeout (strictly below track()'s budget).
         timeout_ms = int(self._settings.scrape_timeout * 1000)
+        deadline = time.monotonic() + timeout_ms / 1000
+        goto_ms = max(5000, int(timeout_ms * 0.6))
+
         page = ctx.new_page()
         responses: list[dict] = []
 
@@ -473,18 +547,26 @@ class _BrowserWorker:
         try:
             url = _TRACK_URL.format(number=number)
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.goto(url, wait_until="domcontentloaded", timeout=goto_ms)
             except Exception as exc:  # noqa: BLE001
+                if _is_dead_browser_error(exc):
+                    raise
                 # Navigation can time out on slow networks but the API call may
                 # still have landed; fall through and inspect what we captured.
                 logger.info("scrape: navigation issue for %s: %s", number, exc)
 
             # The page auto-submits and the result lands in one POST. Poll the
             # captured responses until one carries a timeline or a terminal error.
-            deadline = time.monotonic() + timeout_ms / 1000
             while time.monotonic() < deadline:
                 best = self._pick_response(responses)
                 if best is not None:
+                    # A "no data" answer from the blocked Chromium fallback is an
+                    # anti-bot block, NOT a real negative — surface it loudly.
+                    if self._fallback_chromium and str(best.get("error", "")).upper() in _TERMINAL_ERRORS:
+                        raise ProviderError(
+                            "parcelsapp returned no data on the bundled-Chromium fallback "
+                            "(likely an anti-bot block — install system Edge/Chrome)"
+                        )
                     logger.info("scrape: captured parcelsapp response for %s", number)
                     return best
                 page.wait_for_timeout(1200)
@@ -512,17 +594,17 @@ class _BrowserWorker:
                 return j  # definitive "no data"
         return None
 
-    def _drain_with_error(self) -> None:
+    def _drain(self, msg: str) -> None:
         while True:
             try:
                 job = self._q.get_nowait()
             except queue.Empty:
                 return
             if job is None:
-                return
+                continue
             _, fut = job
             if not fut.done():
-                fut.set_exception(ProviderError(self._fatal or "scrape unavailable"))
+                fut.set_exception(ProviderError(msg))
 
 
 class ScrapeProvider(TrackingProvider):
@@ -536,10 +618,13 @@ class ScrapeProvider(TrackingProvider):
             ScrapeProvider._worker = _BrowserWorker(settings)
 
     async def track(self, number: str, carrier: Optional[int] = None) -> Optional[TrackResult]:
+        # NOTE: ``carrier`` (a 17track carrier code) is intentionally ignored —
+        # parcelsapp auto-detects the carrier from the number and the scrape
+        # sends only the number, so carrier disambiguation is unsupported here.
         worker = ScrapeProvider._worker
         assert worker is not None
         fut = worker.submit(number)
-        budget = self.settings.scrape_timeout + 20
+        budget = self.settings.scrape_timeout + 20  # strictly > the worker ceiling
         try:
             data = await asyncio.wait_for(asyncio.wrap_future(fut), timeout=budget)
         except asyncio.TimeoutError as exc:
@@ -549,4 +634,4 @@ class ScrapeProvider(TrackingProvider):
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(f"scrape failed: {exc}") from exc
 
-        return parse_parcels_payload(data, number, self.settings.include_raw, carrier)
+        return parse_parcels_payload(data, number, self.settings.include_raw)

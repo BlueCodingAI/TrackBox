@@ -22,10 +22,14 @@ from .models import (
 )
 
 # Map a top-level status onto the furthest milestone it implies.
+# "Expired" is deliberately mapped to "InfoReceived" (not "InTransit"): an
+# expired/archived parcel may never have actually shipped, so we must NOT
+# fabricate an "In Transit" milestone — let the event stages raise the bar if
+# (and only if) a real scan supports it.
 _STATUS_TO_MILESTONE = {
     "InfoReceived": "InfoReceived",
     "InTransit": "InTransit",
-    "Expired": "InTransit",
+    "Expired": "InfoReceived",
     "Exception": "InTransit",
     "AvailableForPickup": "OutForDelivery",
     "OutForDelivery": "OutForDelivery",

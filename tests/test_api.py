@@ -95,7 +95,9 @@ def test_frontend_served():
 import json  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from app.providers import build_chain  # noqa: E402
+import pytest  # noqa: E402
+
+from app.providers import build_chain, ProviderError  # noqa: E402
 from app.providers.scrape import ScrapeProvider, parse_parcels_payload  # noqa: E402
 from app.config import Settings  # noqa: E402
 
@@ -144,7 +146,8 @@ def test_scrape_payload_no_data_returns_none():
 
 def test_scrape_payload_archive_without_delivery_is_not_delivered():
     # parcelsapp marks stalled shipments "archive" with no delivery sub_status —
-    # must NOT be reported as Delivered.
+    # must NOT be reported as Delivered, and must NOT fake an "In Transit"
+    # milestone for a parcel that never left the seller.
     data = {
         "states": [{"date": "2025-06-14T05:16:19Z", "carrier": 0,
                     "status": "Pending shipping by the seller"}],
@@ -155,6 +158,53 @@ def test_scrape_payload_archive_without_delivery_is_not_delivered():
     assert result is not None
     assert result.is_delivered is False
     assert result.status == "Expired"
+    ms = {m.stage: m.reached for m in result.milestones}
+    assert ms["InfoReceived"] is True
+    assert ms["InTransit"] is False  # never shipped — no phantom transit milestone
+
+
+def test_scrape_payload_in_transit_partial_milestones():
+    # A genuinely in-transit parcel: status reflects InTransit, not delivered,
+    # and the milestone bar is partially filled (InTransit reached, Delivered not).
+    data = {
+        "states": [
+            {"location": "Frankfurt, DE", "date": "2026-06-10T09:00:00Z", "carrier": 0,
+             "status": "Departed from facility"},
+            {"location": "Shenzhen, CN", "date": "2026-06-08T02:00:00Z", "carrier": 0,
+             "status": "Shipping label created"},
+        ],
+        "carriers": ["DHL"],
+        "status": "transit",
+    }
+    result = parse_parcels_payload(data, "TRANSIT123", False)
+    assert result is not None
+    assert result.status == "InTransit"
+    assert result.is_delivered is False
+    ms = {m.stage: m.reached for m in result.milestones}
+    assert ms["InTransit"] is True
+    assert ms["Delivered"] is False
+    assert result.origin and result.origin.city == "Shenzhen"  # oldest located scan
+
+
+def test_scrape_payload_negated_delivery_is_not_delivered():
+    # "could not be delivered" must NOT be read as Delivered (no confetti!).
+    data = {
+        "states": [{"date": "2026-06-18T18:00:00Z", "carrier": 0,
+                    "status": "The package could not be delivered to the recipient"}],
+        "carriers": ["UPS"],
+        "status": "archive",
+    }
+    result = parse_parcels_payload(data, "FAIL123", False)
+    assert result is not None
+    assert result.is_delivered is False
+    assert result.status in ("DeliveryFailure", "Exception")
+
+
+def test_scrape_payload_transient_error_raises():
+    # A non-terminal error with no timeline is transient → ProviderError (so the
+    # resolver logs it), NOT a silent "not found".
+    with pytest.raises(ProviderError):
+        parse_parcels_payload({"error": "TEMP_FAIL"}, "X12345", False)
 
 
 def test_scrape_mode_is_scrape_only_by_default():
